@@ -268,8 +268,8 @@ async def test_upgrade_worker_records_mirror_errors(monkeypatch: pytest.MonkeyPa
         "run_upgrade",
         lambda verbose=False, allow_prerelease=False, version=None, locale="zh": UpgradeResult(
             success=False,
-            error="upgrade failed on all mirrors",
-            mirror_errors=["mirror-a: timeout", "pypi.org: denied"],
+            error="upgrade failed on the private index",
+            mirror_errors=["pypi.rodcountdi.com: timeout", "pypi.rodcountdi.com: denied"],
         ),
     )
 
@@ -279,7 +279,10 @@ async def test_upgrade_worker_records_mirror_errors(monkeypatch: pytest.MonkeyPa
     stored = await get_task(task.task_id)
     assert stored is not None
     assert stored.status == UpgradeTaskStatus.ERROR
-    assert stored.mirror_errors == ["mirror-a: timeout", "pypi.org: denied"]
+    assert stored.mirror_errors == [
+        "pypi.rodcountdi.com: timeout",
+        "pypi.rodcountdi.com: denied",
+    ]
 
 
 @pytest.mark.asyncio
@@ -387,7 +390,9 @@ def _settings_server(stable_only: bool | None = None) -> Any:
 
 
 def test_build_status_success_reports_source(monkeypatch: pytest.MonkeyPatch) -> None:
-    info = self_update.PyPIInfo(version="1.2.3", description="desc", source="mirrors.aliyun.com")
+    info = self_update.PyPIInfo(
+        version="1.2.3", description="desc", source="pypi.rodcountdi.com"
+    )
     monkeypatch.setattr(update_router, "fetch_pypi_info", lambda: info)
 
     payload = update_router._build_status()
@@ -395,23 +400,23 @@ def test_build_status_success_reports_source(monkeypatch: pytest.MonkeyPatch) ->
     assert payload["latest_version"] == "1.2.3"
     assert payload["error"] is None
     assert payload["error_code"] is None
-    assert payload["source"] == "mirrors.aliyun.com"
+    assert payload["source"] == "pypi.rodcountdi.com"
 
 
 def test_build_status_failure_via_check_keeps_error_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = update_router._build_status(
-        latest=None, error="could not reach PyPI", error_code="pypi_unreachable"
+        latest=None, error="could not reach the package index", error_code="index_unreachable"
     )
 
     assert payload["latest_version"] is None
-    assert payload["error"] == "could not reach PyPI"
-    assert payload["error_code"] == "pypi_unreachable"
+    assert payload["error"] == "could not reach the package index"
+    assert payload["error_code"] == "index_unreachable"
 
 
 @pytest.mark.asyncio
-async def test_check_endpoint_reports_error_code_when_pypi_unreachable(
+async def test_check_endpoint_reports_error_code_when_index_unreachable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(update_router, "fetch_pypi_info", lambda: None)
@@ -419,21 +424,21 @@ async def test_check_endpoint_reports_error_code_when_pypi_unreachable(
     result = await update_router.check_for_updates(_=None, server=_settings_server())
 
     assert result["latest_version"] is None
-    assert result["error"] == "could not reach PyPI"
-    assert result["error_code"] == "pypi_unreachable"
+    assert result["error"] == "could not reach the package index"
+    assert result["error_code"] == "index_unreachable"
 
 
 @pytest.mark.asyncio
 async def test_check_endpoint_success_passes_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    info = self_update.PyPIInfo(version="1.2.3", source="pypi.org")
+    info = self_update.PyPIInfo(version="1.2.3", source="pypi.rodcountdi.com")
     monkeypatch.setattr(update_router, "fetch_pypi_info", lambda: info)
 
     result = await update_router.check_for_updates(_=None, server=_settings_server())
 
     assert result["latest_version"] == "1.2.3"
-    assert result["source"] == "pypi.org"
+    assert result["source"] == "pypi.rodcountdi.com"
     assert result["error"] is None
     assert result["stable_only"] is True
     assert result["latest_is_prerelease"] is False
@@ -443,7 +448,7 @@ async def test_check_endpoint_success_passes_source(
 async def test_status_stable_only_ignores_prerelease(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    info = self_update.PyPIInfo(version="0.9.34b1", latest_stable="0.9.33", source="pypi.org")
+    info = self_update.PyPIInfo(version="0.9.34b1", latest_stable="0.9.33", source="pypi.rodcountdi.com")
     monkeypatch.setattr(update_router, "fetch_pypi_info", lambda: info)
     monkeypatch.setattr(update_router, "get_local_version", lambda: "0.9.32")
 
@@ -466,7 +471,7 @@ async def test_status_includes_prerelease_when_stable_only_off(
     info = self_update.PyPIInfo(
         version="0.9.34b1",
         latest_stable="0.9.33",
-        source="pypi.org",
+        source="pypi.rodcountdi.com",
         description="## [0.9.34b1] - 2026-09-01\n\n- beta notes\n\n## [0.9.33]\n- old\n",
     )
     monkeypatch.setattr(update_router, "fetch_pypi_info", lambda: info)
@@ -484,7 +489,7 @@ async def test_status_includes_prerelease_when_stable_only_off(
 async def test_patch_settings_remaps_cached_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    info = self_update.PyPIInfo(version="0.9.34b1", latest_stable="0.9.33", source="pypi.org")
+    info = self_update.PyPIInfo(version="0.9.34b1", latest_stable="0.9.33", source="pypi.rodcountdi.com")
     monkeypatch.setattr(update_router, "fetch_pypi_info", lambda: info)
     monkeypatch.setattr(update_router, "get_local_version", lambda: "0.9.33")
     server = _settings_server(True)
@@ -505,7 +510,7 @@ async def test_patch_settings_remaps_cached_status(
 async def test_trigger_upgrade_pins_stable_when_prerelease_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    info = self_update.PyPIInfo(version="0.9.34b1", latest_stable="0.9.33", source="pypi.org")
+    info = self_update.PyPIInfo(version="0.9.34b1", latest_stable="0.9.33", source="pypi.rodcountdi.com")
     monkeypatch.setattr(update_router, "fetch_pypi_info", lambda: info)
     monkeypatch.setattr(update_router, "get_editable_path", lambda: None)
     monkeypatch.setattr(update_router, "get_local_version", lambda: "0.9.32")
@@ -544,7 +549,7 @@ async def test_trigger_upgrade_pins_stable_when_prerelease_exists(
 async def test_trigger_upgrade_defaults_to_channel_latest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    info = self_update.PyPIInfo(version="0.9.34b1", latest_stable="0.9.33", source="pypi.org")
+    info = self_update.PyPIInfo(version="0.9.34b1", latest_stable="0.9.33", source="pypi.rodcountdi.com")
     monkeypatch.setattr(update_router, "fetch_pypi_info", lambda: info)
     monkeypatch.setattr(update_router, "get_editable_path", lambda: None)
     monkeypatch.setattr(update_router, "get_local_version", lambda: "0.9.32")

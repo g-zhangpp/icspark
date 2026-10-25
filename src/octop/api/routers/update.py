@@ -192,7 +192,7 @@ async def update_status(
     _: Any = Depends(current_user),
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
-    """Return last check result; re-probe PyPI when the server cache TTL expires."""
+    """Return last check result; re-probe the package index when the cache TTL expires."""
     stable_only = _read_stable_only(server)
     cached = get_cached_status()
     if cached is not None:
@@ -215,8 +215,8 @@ async def check_for_updates(
         return await asyncio.to_thread(
             _build_status,
             latest=None,
-            error="could not reach PyPI",
-            error_code="pypi_unreachable",
+            error="could not reach the package index",
+            error_code="index_unreachable",
             stable_only=stable_only,
             include_prerelease=True,
         )

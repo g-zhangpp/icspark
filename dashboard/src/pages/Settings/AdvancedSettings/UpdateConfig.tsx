@@ -4,7 +4,6 @@ import { App, Collapse, Switch } from "antd";
 import {
   BookOpen,
   CheckCircle,
-  Info,
   RefreshCw,
   XCircle,
   AlertTriangle,
@@ -419,17 +418,6 @@ export default function UpdateConfig() {
                       defaultValue: status.error,
                     })
                   : status.error}
-              </span>
-            </div>
-          )}
-
-          {status?.source && status.source !== "pypi.org" && !status.error && (
-            <div className={`${styles.alert} ${styles.alertInfo}`}>
-              <Info size={15} />
-              <span>
-                {t("advancedSettings.update.mirrorSource", {
-                  source: status.source,
-                })}
               </span>
             </div>
           )}

@@ -3762,15 +3762,14 @@
       "restartCommand": "Restart command",
       "editableHint": "Development install detected. Use git pull to update.",
       "networkError": "Could not reach update server. Check your network.",
-      "mirrorSource": "Version info served by mirror {{source}}; it may lag slightly behind pypi.org.",
       "errors": {
-        "pypi_unreachable": "Could not reach PyPI. Check your network and try again."
+        "index_unreachable": "Could not reach the private package index. Check your network and try again."
       },
       "notChecked": "Not checked yet",
       "stageStarting": "Starting...",
       "stageDownloading": "Downloading...",
       "stageInstalling": "Installing...",
-      "mirrorErrorsTitle": "Per-mirror details",
+      "mirrorErrorsTitle": "Package index details",
       "manualUpgradeHint": "You can also run: octop update --verbose",
       "restartServiceBtn": "Restart Service",
       "restarting": "Restarting...",

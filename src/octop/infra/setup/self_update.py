@@ -15,7 +15,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from email.parser import BytesParser
 from pathlib import Path
@@ -29,8 +28,10 @@ from octop.infra.utils.paths import PathLayout
 logger = logging.getLogger(__name__)
 
 _PACKAGE_NAME = "octop"
-_PYPI_URL = f"https://pypi.org/pypi/{_PACKAGE_NAME}/json"
-_PYPI_SIMPLE = "https://pypi.org/simple"
+# 私有包源（pypiserver）：JSON 版本接口与 PEP 503 simple 索引。
+# 服务器只托管 octop 自身；依赖包经 simple 索引 302 回退到 pypi.org。
+_PYPI_URL = "https://pypi.rodcountdi.com/octop/json"
+_PYPI_SIMPLE = "https://pypi.rodcountdi.com/simple"
 _PYPI_UA = {"User-Agent": f"{_PACKAGE_NAME}-updater/1.0"}
 _GREEN_PACKAGES_ENV = "OCTOP_GREEN_PACKAGES"
 _STASH_SUFFIX = ".octop-old"
@@ -38,13 +39,6 @@ _PROBE_TIMEOUT_S = 8
 _PROBE_PREFIX = "__OCTOP_PROBE__"
 _INSTALL_TIMEOUT_S = 90
 _TARGET_INSTALL_TIMEOUT_S = 900
-
-_MIRRORS = [
-    "https://mirrors.cloud.tencent.com/pypi/simple",
-    "https://mirrors.aliyun.com/pypi/simple",
-    "https://pypi.tuna.tsinghua.edu.cn/simple",
-    "https://mirrors.ustc.edu.cn/pypi/simple",
-]
 
 _COMMON_UV_PATHS = [
     os.path.expanduser("~/.local/bin/uv"),
@@ -162,7 +156,7 @@ class PyPIInfo:
     """Package long description."""
 
     source: str | None = None
-    """Label of the source that served this payload (e.g. ``pypi.org``)."""
+    """Label of the source that served this payload (private index hostname)."""
 
     latest_stable: str | None = None
     """Newest non-pre-release version, or None if every release is a pre-release."""
@@ -212,13 +206,6 @@ def pick_latest_versions(versions: list[str]) -> tuple[str | None, str | None]:
     return latest_any, latest_stable
 
 
-def _pypi_json_url(version: str | None = None) -> str:
-    if not version:
-        return _PYPI_URL
-    encoded = urllib.parse.quote(version, safe="")
-    return f"https://pypi.org/pypi/{_PACKAGE_NAME}/{encoded}/json"
-
-
 def _load_pypi_json(url: str, timeout: int) -> dict[str, Any]:
     req = urllib.request.Request(url, headers=_PYPI_UA)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -226,33 +213,13 @@ def _load_pypi_json(url: str, timeout: int) -> dict[str, Any]:
     return payload
 
 
-def _description_for_version(
-    version: str,
-    fallback: str | None,
-    timeout: int,
-) -> str | None:
-    """Return the long description uploaded with *version*.
-
-    Warehouse's unversioned ``/pypi/<name>/json`` ``info`` object is the latest
-    *stable* release. Pre-release changelogs only appear on
-    ``/pypi/<name>/<version>/json``.
-    """
-    try:
-        data = _load_pypi_json(_pypi_json_url(version), timeout)
-        description = data["info"].get("description")
-        if isinstance(description, str) and description.strip():
-            return description
-    except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError) as exc:
-        logger.warning("failed to fetch PyPI description for %s: %s", version, exc)
-    return fallback
-
-
 def fetch_pypi_info(timeout: int = 10) -> PyPIInfo | None:
-    """Fetch version and long description from the PyPI JSON API.
+    """Fetch version info from the private index JSON API.
 
     ``version`` is the newest release including pre-releases. ``latest_stable``
     is the newest non-pre-release (None when the index only has pre-releases).
-    Returns None on any network or parse failure.
+    The private index does not serve package descriptions, so ``description``
+    stays None. Returns None on any network or parse failure.
     """
     try:
         data = _load_pypi_json(_PYPI_URL, timeout)
@@ -265,18 +232,14 @@ def fetch_pypi_info(timeout: int = 10) -> PyPIInfo | None:
         if latest_any is None:
             latest_any = info_version
             latest_stable = info_version if not is_prerelease(info_version) else None
-        raw_description = info.get("description")
-        description = raw_description if isinstance(raw_description, str) else None
-        if latest_any and latest_any != info_version:
-            description = _description_for_version(latest_any, description, timeout)
         return PyPIInfo(
             version=latest_any,
             latest_stable=latest_stable,
-            description=description,
-            source="pypi.org",
+            description=None,
+            source=urllib.parse.urlparse(_PYPI_URL).hostname,
         )
     except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError) as exc:
-        logger.warning("failed to fetch PyPI info: %s", exc)
+        logger.warning("failed to fetch package index info: %s", exc)
         return None
 
 
@@ -722,10 +685,8 @@ def _target_dependencies_satisfied(
 
 
 def index_label(index_url: str) -> str:
-    """Short label for logs / UI (hostname, or ``pypi.org``)."""
+    """Short label for logs / UI (hostname of the index URL)."""
     host = urllib.parse.urlparse(index_url).hostname
-    if host == "pypi.org":
-        return "pypi.org"
     return host or index_url
 
 
@@ -777,40 +738,17 @@ def rank_install_indexes(
     *,
     probe_timeout: float = _PROBE_TIMEOUT_S,
 ) -> tuple[list[tuple[str, str]], list[str]]:
-    """Probe mirrors in parallel; return ``([(index_url, label), ...], skip_errors)``.
+    """Probe the private index; return ``([(index_url, label), ...], skip_errors)``.
 
-    Install candidates are indexes that list the target version, ordered by probe
-    latency. ``pypi.org`` is always appended as a final fallback even when its
-    probe fails (HTML parse misses / transient errors).
+    The private index is the only install source — no mirror chain and no
+    pypi.org fallback. When its probe fails, the empty ``ordered`` list makes
+    the upgrade fail fast with the probe detail in ``skip_errors``.
     """
-    indexes = [*_MIRRORS, _PYPI_SIMPLE]
-    probes: list[IndexProbe] = []
-    with ThreadPoolExecutor(max_workers=len(indexes)) as pool:
-        futures = [
-            pool.submit(probe_index, url, version=version, timeout=probe_timeout) for url in indexes
-        ]
-        for fut in as_completed(futures):
-            probes.append(fut.result())
-
-    skip_errors: list[str] = []
-    mirror_hits: list[IndexProbe] = []
-    pypi_probe: IndexProbe | None = None
-    for probe in probes:
-        if probe.label == "pypi.org":
-            pypi_probe = probe
-            continue
-        if probe.status == "has_version":
-            mirror_hits.append(probe)
-        else:
-            skip_errors.append(f"{probe.label}: {probe.detail or probe.status}")
-
-    mirror_hits.sort(key=lambda item: item.elapsed)
-    ordered: list[tuple[str, str]] = [(item.index_url, item.label) for item in mirror_hits]
-
-    if pypi_probe is not None and pypi_probe.status != "has_version":
-        skip_errors.append(f"pypi.org: {pypi_probe.detail or pypi_probe.status}")
-    ordered.append((_PYPI_SIMPLE, "pypi.org"))
-    return ordered, skip_errors
+    probe = probe_index(_PYPI_SIMPLE, version=version, timeout=probe_timeout)
+    if probe.status == "has_version":
+        return [(probe.index_url, probe.label)], []
+    detail = f"{probe.label}: {probe.detail or probe.status}"
+    return [], [detail]
 
 
 def _all_mirrors_failed(mirror_errors: list[str]) -> UpgradeResult:
@@ -831,7 +769,7 @@ def _all_mirrors_failed(mirror_errors: list[str]) -> UpgradeResult:
         hint = f" ({short})"
     return UpgradeResult(
         success=False,
-        error=f"upgrade failed on all mirrors{hint}",
+        error=f"upgrade failed on the private index{hint}",
         mirror_errors=mirror_errors,
     )
 
@@ -898,8 +836,9 @@ def _run_fpk_upgrade(
     安装到该打包目录本身，重启服务后即加载新版，升级真正生效。
 
     与普通部署不同，FPK 首次在线升级需要从零解析并下载完整依赖树
-    （octop 依赖 octop-harness 等大包），故安装超时显著放宽；先并行探测
-    simple index，缺版本/不可达的镜像直接跳过，最后以 pypi.org 兜底。
+    （octop 依赖 octop-harness 等大包），故安装超时显著放宽；安装源为
+    私有 simple index（依赖包由服务器 302 回退 pypi.org），索引探测
+    失败即升级失败，无镜像链兜底。
     """
     if not os.path.isdir(site_packages):
         return UpgradeResult(
